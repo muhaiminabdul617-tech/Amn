@@ -1,0 +1,139 @@
+services:
+  - type: web
+    name: attendance-system
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      export FLASK_APP=wsgi.py
+      python -c "
+      import os
+      import logging
+      from app import create_app
+      from app.extensions import db
+      from config import ProductionConfig
+      from sqlalchemy import inspect, text
+      
+      # Configure logging
+      logging.basicConfig(level=logging.INFO)
+      logger = logging.getLogger(__name__)
+      
+      app = create_app(ProductionConfig)
+      
+      with app.app_context():
+          try:
+              # Import all models to ensure they are registered
+              from app.models import (
+                  User, Course, Department, Attendance, CourseStudent,
+                  LoginLog, ActivityLog, Notification, Lecture
+              )
+              
+              # Initialize migrations
+              logger.info('Initializing migrations...')
+              from flask_migrate import upgrade
+              upgrade()
+              logger.info('Database migrations applied')
+              
+              # Verify database setup
+              logger.info('Verifying database setup...')
+              inspector = inspect(db.engine)
+              
+              # Check tables
+              tables = inspector.get_table_names()
+              logger.info(f'Created tables: {tables}')
+              
+              # Check users table columns
+              if 'users' in tables:
+                  columns = [col['name'] for col in inspector.get_columns('users')]
+                  logger.info(f'Users table columns: {columns}')
+                  if 'login_id' not in columns:
+                      raise Exception('login_id column is missing from users table')
+              else:
+                  raise Exception('users table was not created')
+              
+              # Create default department if it doesn't exist
+              logger.info('Creating default department...')
+              dept = Department.query.filter_by(code='CSC').first()
+              if not dept:
+                  dept = Department(name='Computer Science', code='CSC')
+                  db.session.add(dept)
+                  db.session.commit()
+                  logger.info('Default department created')
+              else:
+                  logger.info('Default department already exists')
+              
+              # Create default admin user if it doesn't exist
+              logger.info('Creating default admin user...')
+              admin = User.query.filter_by(login_id='ADMIN001').first()
+              if not admin:
+                  admin = User(
+                      login_id='ADMIN001',
+                      email='admin@example.com',
+                      first_name='Admin',
+                      last_name='User',
+                      role='admin'
+                  )
+                  admin.password = 'admin123'
+                  admin.department_id = dept.id
+                  db.session.add(admin)
+                  db.session.commit()
+                  logger.info('Default admin user created')
+              else:
+                  logger.info('Default admin user already exists')
+              
+              logger.info('Database setup completed successfully')
+              
+          except Exception as e:
+              logger.error(f'Error during database setup: {str(e)}')
+              raise
+      "
+    startCommand: gunicorn wsgi:app --config gunicorn_config.py
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: FLASK_APP
+        value: wsgi.py
+      - key: FLASK_ENV
+        value: production
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: attendance_db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: redis
+          type: redis
+          property: connectionString
+      - key: SERVER_NAME
+        value: unilorin-ams-vf9i.onrender.com
+      - key: LOG_LEVEL
+        value: INFO
+      - key: RATELIMIT_STORAGE_URL
+        fromService:
+          name: redis
+          type: redis
+          property: connectionString
+    disk:
+      name: attendance-data
+      mountPath: /data
+      sizeGB: 1
+
+  - type: redis
+    name: redis
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: everywhere
+    plan: free
+
+databases:
+  - name: attendance_db
+    databaseName: attendance_db
+    plan: free
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: everywhere
+    postDeploy: |
+      flask db upgrade
